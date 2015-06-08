@@ -16,6 +16,8 @@
 
 // File I/O for logs.
 
+// Author: Bram Gruneir (bram@cockroachlabs.com)
+
 package log
 
 import (
@@ -23,20 +25,28 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math"
 	"os"
 	"os/user"
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/cockroach/proto"
 	"github.com/cockroachdb/cockroach/util"
 )
 
 // MaxSize is the maximum size of a log file in bytes.
 var MaxSize uint64 = 1024 * 1024 * 1800
+
+// EntiresCutoff is the cutoff in which FetchEntiresFromFiles will stop
+// reading in older log files.
+var EntiresCutoff = 100000
 
 // If non-empty, overrides the choice of directory in which to write logs.
 // See createLogDirs for the full list of possible destinations.
@@ -46,7 +56,8 @@ var logDir *string
 var logDirs []string
 
 // logFileRE matches log files to avoid exposing non-log files accidentally.
-var logFileRE = regexp.MustCompile(`log\.(INFO|WARNING|ERROR)\.`)
+// and it splits the details of the filename into groups for easy parsing.
+var logFileRE = regexp.MustCompile(`([^\.]+)\.([^\.]+)\.([^\.]+)\.log\.(ERROR|WARNING|INFO)\.([^\.]+)\.(\d+)`)
 
 func createLogDirs() {
 	if *logDir != "" {
@@ -85,36 +96,92 @@ func shortHostname(hostname string) string {
 	return hostname
 }
 
-// logName returns a new log file name containing tag, with start time t, and
-// the name for the symlink for tag.
-func logName(tag string, t time.Time) (name, link string) {
-	name = fmt.Sprintf("%s.%s.%s.log.%s.%04d%02d%02d-%02d%02d%02d.%d",
-		program,
-		host,
-		userName,
-		tag,
-		t.Year(),
-		t.Month(),
-		t.Day(),
-		t.Hour(),
-		t.Minute(),
-		t.Second(),
+// escapeString replaces all the periods in the string with an underscore, and
+// every underscore with a double underscore.
+func escapeStringForFilename(s string) string {
+	sEscapedPartial := strings.Replace(s, "_", "__", -1)
+	return strings.Replace(sEscapedPartial, ".", "_", -1)
+}
+
+// unescapeStringForFilename reverts the escaping from escapeStringForFilename.
+func unescapeStringForFilename(s string) string {
+	sUnescapedPartial := strings.Replace(s, "_", ".", -1)
+	return strings.Replace(sUnescapedPartial, "__", "_", -1)
+}
+
+// logName returns a new log file name containing level, with start time t, and
+// the name for the symlink for level.
+func logName(level Level, t time.Time) (name, link string) {
+	// Replace the ':'s in the time format with '_'s to allow for log files in
+	// Windows.
+	tFormatted := strings.Replace(t.Format(time.RFC3339), ":", "_", -1)
+
+	name = fmt.Sprintf("%s.%s.%s.log.%s.%s.%d",
+		escapeStringForFilename(program),
+		escapeStringForFilename(host),
+		escapeStringForFilename(userName),
+		level.String(),
+		tFormatted,
 		pid)
-	return name, program + "." + tag
+	return name, program + "." + level.String()
+}
+
+// A FileDetails holds all of the particulars that can be parsed by the name of
+// a log file.
+type FileDetails struct {
+	Program  string
+	Host     string
+	UserName string
+	Level    Level
+	Time     time.Time
+	PID      int
+}
+
+func parseLogFilename(filename string) (FileDetails, error) {
+	matches := logFileRE.FindStringSubmatch(filename)
+	if matches == nil || len(matches) != 7 {
+		return FileDetails{}, util.Errorf("not a log file")
+	}
+
+	level, levelFound := LevelFromString(matches[4])
+	if !levelFound {
+		return FileDetails{}, util.Errorf("not a log file, couldn't parse level")
+	}
+
+	// Replace the '_'s with ':'s to restore the correct time format.
+	fixTime := strings.Replace(matches[5], "_", ":", -1)
+	time, err := time.Parse(time.RFC3339, fixTime)
+	if err != nil {
+		return FileDetails{}, err
+	}
+
+	pid, err := strconv.ParseInt(matches[6], 10, 0)
+	if err != nil {
+		return FileDetails{}, err
+	}
+
+	return FileDetails{
+		Program:  unescapeStringForFilename(matches[1]),
+		Host:     unescapeStringForFilename(matches[2]),
+		UserName: unescapeStringForFilename(matches[3]),
+		Level:    level,
+		Time:     time,
+		PID:      int(pid),
+	}, nil
 }
 
 var onceLogDirs sync.Once
 
 // create creates a new log file and returns the file and its filename, which
-// contains tag ("INFO", "FATAL", etc.) and t.  If the file is created
+// contains level ("INFO", "FATAL", etc.) and t.  If the file is created
 // successfully, create also attempts to update the symlink for that tag, ignoring
 // errors.
-func create(tag string, t time.Time) (f *os.File, filename string, err error) {
+func create(level Level, t time.Time) (f *os.File, filename string, err error) {
 	onceLogDirs.Do(createLogDirs)
 	if len(logDirs) == 0 {
 		return nil, "", errors.New("log: no log dirs")
 	}
-	name, link := logName(tag, t)
+	name, link := logName(level, t)
 	var lastErr error
 	for _, dir := range logDirs {
 		fname := filepath.Join(dir, name)
@@ -139,24 +206,18 @@ func create(tag string, t time.Time) (f *os.File, filename string, err error) {
 
 // verifyFileInfo verifies that the file specified by filename is a
 // regular file and filename matches the expected filename pattern.
-// Returns the log level on success; otherwise error.
-func verifyFileInfo(info os.FileInfo) (Level, error) {
+// Returns the log file details success; otherwise error.
+func verifyFileInfo(info os.FileInfo) (FileDetails, error) {
 	if info.Mode()&os.ModeType != 0 {
-		return INFO, util.Errorf("not a regular file")
-	}
-	matches := logFileRE.FindStringSubmatch(info.Name())
-	if matches == nil || len(matches) < 1 {
-		return INFO, util.Errorf("not a log file")
+		return FileDetails{}, util.Errorf("not a regular file")
 	}
 
-	switch matches[1] {
-	case "ERRROR":
-		return ERROR, nil
-	case "WARNING":
-		return WARNING, nil
-	default:
-		return INFO, nil
+	details, err := parseLogFilename(info.Name())
+	if err != nil {
+		return FileDetails{}, err
 	}
+
+	return details, nil
 }
 
 func verifyFile(filename string) error {
@@ -173,7 +234,7 @@ type FileInfo struct {
 	Name         string // base name
 	SizeBytes    int64
 	ModTimeNanos int64 // most recent mode time in unix nanos
-	Level        string
+	Details      FileDetails
 }
 
 // ListLogFiles returns a slice of FileInfo structs for each log file
@@ -186,13 +247,13 @@ func ListLogFiles() ([]FileInfo, error) {
 			return results, err
 		}
 		for _, info := range infos {
-			level, err := verifyFileInfo(info)
+			details, err := verifyFileInfo(info)
 			if err == nil {
 				results = append(results, FileInfo{
 					Name:         info.Name(),
 					SizeBytes:    info.Size(),
 					ModTimeNanos: info.ModTime().UnixNano(),
-					Level:        level.String(),
+					Details:      details,
 				})
 			}
 		}
@@ -234,4 +295,93 @@ func GetLogReader(filename string, allowAbsolute bool) (io.ReadCloser, error) {
 		}
 	}
 	return nil, err
+}
+
+// int64sortable is required so we can sort on an int64 slice.
+type int64sortable []int64
+
+func (a int64sortable) Len() int           { return len(a) }
+func (a int64sortable) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a int64sortable) Less(i, j int) bool { return a[i] < a[j] }
+
+// FetchEntiresFromFiles fetches all available logs on disk that are of the
+// level of severity (or worse) and are between the start and end times. It will
+// stop reading in new files if the EntiresCutoff is exceeded, no more files
+// will be retrieved. The logs entries returned will be in decreasing order,
+// with the closest log to the start time being the first entry.
+func FetchEntiresFromFiles(level Level, startTimeNano, endTimeNano int64) ([]proto.LogEntry, error) {
+	logFiles, err := ListLogFiles()
+	if err != nil {
+		return nil, err
+	}
+
+	logFileMap := make(map[int64]FileInfo)
+	var nanos int64sortable
+	var diffToStart int64 = math.MaxInt64
+	// closestToStartNano holds the last log file that would include any entries
+	// from the start time onward in it.
+	var closestToStartNano int64
+	for _, logFile := range logFiles {
+		if logFile.Details.Level == level {
+			nano := logFile.Details.Time.UnixNano()
+			if nano <= endTimeNano {
+				logFileMap[nano] = logFile
+				nanos = append(nanos, nano)
+				if nano <= startTimeNano && (startTimeNano-nano) < diffToStart {
+					diffToStart = startTimeNano - nano
+					closestToStartNano = nano
+				}
+			}
+		}
+	}
+
+	// There are no logs to display.
+	if len(nanos) == 0 {
+		return []proto.LogEntry{}, nil
+	}
+
+	// Sort the files in reverse order so we will fetch the newest first.
+	sort.Sort(sort.Reverse(nanos))
+	entries := []proto.LogEntry{}
+	for _, nano := range nanos {
+		newEntries, err := readAllEntriesFromFile(logFileMap[nano], startTimeNano, endTimeNano)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, newEntries...)
+		if len(entries) >= EntiresCutoff {
+			break
+		}
+		if nano == closestToStartNano {
+			// don't read any files that have no timestamps after
+			break
+		}
+	}
+	return entries, nil
+}
+
+// readAllEntriesFromFile reads in all log entries from a given file that are
+// between the start and end times and returns the entries in the reverse order,
+// from newest to oldest.
+func readAllEntriesFromFile(file FileInfo, startTimeNano, endTimeNano int64) ([]proto.LogEntry, error) {
+	reader, err := GetLogReader(file.Name, false)
+	defer reader.Close()
+	if reader == nil || err != nil {
+		return nil, err
+	}
+	entries := []proto.LogEntry{}
+	decoder := NewEntryDecoder(reader)
+	for {
+		entry := proto.LogEntry{}
+		if err := decoder.Decode(&entry); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		if entry.Time >= startTimeNano && entry.Time <= endTimeNano {
+			entries = append([]proto.LogEntry{entry}, entries...)
+		}
+	}
+	return entries, nil
 }

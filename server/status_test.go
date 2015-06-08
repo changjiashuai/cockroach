@@ -297,7 +297,10 @@ func startServerAndGetStatus(t *testing.T, keyPrefix string) (*TestServer, []byt
 	return ts, body
 }
 
-func TestStatusLocalLog(t *testing.T) {
+// TestStatusLocalLogs checks to ensure that local/logfiles,
+// local/logfiles/{filename}, local/log and local/log/{level} function
+// correctly.
+func TestStatusLocalLogs(t *testing.T) {
 	dir, err := ioutil.TempDir("", "local_log_test")
 	if err != nil {
 		t.Fatal(err)
@@ -309,7 +312,7 @@ func TestStatusLocalLog(t *testing.T) {
 			t.Fatal(err)
 		}
 	}()
-	ts, body := startServerAndGetStatus(t, statusLocalLogKeyPrefix)
+	ts, body := startServerAndGetStatus(t, statusLocalLogFileKeyPrefix)
 	defer ts.Stop()
 
 	type logsWrapper struct {
@@ -329,7 +332,9 @@ func TestStatusLocalLog(t *testing.T) {
 	}
 
 	// Log an error which we expect to show up on every log file.
-	log.Errorf("TestStatusLocalLog test message")
+	log.Errorf("TestStatusLocalLogFile test message-Error")
+	log.Warningf("TestStatusLocalLogFile test message-Warning")
+	log.Infof("TestStatusLocalLogFile test message-Info")
 
 	// Fetch a each listed log directly.
 	type logWrapper struct {
@@ -337,20 +342,65 @@ func TestStatusLocalLog(t *testing.T) {
 	}
 	// Check each individual log can be fetched and is non-empty.
 	for _, log := range logs.Data {
-		body = getRequest(t, ts, fmt.Sprintf("%s%s", statusLocalLogKeyPrefix, log.Name))
+		body = getRequest(t, ts, fmt.Sprintf("%s%s", statusLocalLogFileKeyPrefix, log.Name))
 		logW := logWrapper{}
 		if err := json.Unmarshal(body, &logW); err != nil {
 			t.Fatal(err)
 		}
 		var found bool
 		for i := len(logW.Data) - 1; i >= 0; i-- {
-			if logW.Data[i].Format == "TestStatusLocalLog test message" {
+			if logW.Data[i].Format == "TestStatusLocalLogFile test message-Error" {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Errorf("exected to find test message in %v", logW.Data)
+			t.Errorf("expected to find test message in %v", logW.Data)
+		}
+	}
+
+	// Fetch the full list of log entries.
+	type entryWarpper struct {
+		Data []proto.LogEntry `json:"d"`
+	}
+
+	testCases := []struct {
+		Level           log.Level
+		ExpectedError   bool
+		ExpectedWarning bool
+		ExpectedInfo    bool
+	}{
+		{log.INFO, true, true, true},
+		{log.WARNING, true, true, false},
+		{log.ERROR, true, false, false},
+	}
+
+	for i, testCase := range testCases {
+		body = getRequest(t, ts, fmt.Sprintf("%s%s", statusLocalLogKeyPrefix, testCase.Level.String()))
+		entities := entryWarpper{}
+		if err := json.Unmarshal(body, &entities); err != nil {
+			t.Fatal(err)
+		}
+		var actualInfo, actualWarning, actualError bool
+		for _, entity := range entities.Data {
+			switch entity.Format {
+			case "TestStatusLocalLogFile test message-Error":
+				actualError = true
+			case "TestStatusLocalLogFile test message-Warning":
+				actualWarning = true
+			case "TestStatusLocalLogFile test message-Info":
+				actualInfo = true
+			}
+		}
+
+		if testCase.ExpectedError != actualError {
+			t.Errorf("%d: expected error:%t, actual error:%t", i, testCase.ExpectedError, actualError)
+		}
+		if testCase.ExpectedWarning != actualWarning {
+			t.Errorf("%d: expected warning:%t, actual warning:%t", i, testCase.ExpectedWarning, actualWarning)
+		}
+		if testCase.ExpectedInfo != actualInfo {
+			t.Errorf("%d: expected info:%t, actual info:%t", i, testCase.ExpectedInfo, actualInfo)
 		}
 	}
 }

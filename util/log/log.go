@@ -17,11 +17,18 @@
 
 package log
 
-import "golang.org/x/net/context"
+import (
+	"strings"
 
-// Log Level Enum.
+	"golang.org/x/net/context"
+)
+
+// Level Enum for log severity levels.
 type Level int
 
+// TODO(Bram): combine this with clog.severity, and rename severity.
+
+// These constants identify the log levels in order of increasing severity.
 const (
 	INFO Level = iota
 	WARNING
@@ -36,8 +43,25 @@ var levels = [...]string{
 	"FATAL",
 }
 
+// String returns the string representation of the log level.
 func (level Level) String() string {
 	return levels[level]
+}
+
+// LevelFromString returns the log level if it can match it.
+func LevelFromString(level string) (Level, bool) {
+	switch strings.ToUpper(strings.TrimSpace(level)) {
+	case "FATAL":
+		return FATAL, true
+	case "ERROR":
+		return ERROR, true
+	case "WARNING":
+		return WARNING, true
+	case "INFO":
+		return INFO, true
+	default:
+		return INFO, false
+	}
 }
 
 func init() {
