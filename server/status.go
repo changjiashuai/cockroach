@@ -244,7 +244,7 @@ func (s *statusServer) handleLocalLogFile(w http.ResponseWriter, r *http.Request
 // time is used. The cutoff for entires is defined in log.EntriesCutoff.
 func (s *statusServer) handleLocalLog(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
 	log.Flush()
-	level, _ := log.LevelFromString(ps.ByName("level"))
+	level, _ := log.SeverityByName(ps.ByName("level"))
 	startTime := r.URL.Query().Get("starttime")
 	var startTimeNano int64
 	if len(startTime) > 0 {

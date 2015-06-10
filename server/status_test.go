@@ -365,18 +365,18 @@ func TestStatusLocalLogs(t *testing.T) {
 	}
 
 	testCases := []struct {
-		Level           log.Level
+		Level           log.Severity
 		ExpectedError   bool
 		ExpectedWarning bool
 		ExpectedInfo    bool
 	}{
-		{log.INFO, true, true, true},
-		{log.WARNING, true, true, false},
-		{log.ERROR, true, false, false},
+		{log.InfoLog, true, true, true},
+		{log.WarningLog, true, true, false},
+		{log.ErrorLog, true, false, false},
 	}
 
 	for i, testCase := range testCases {
-		body = getRequest(t, ts, fmt.Sprintf("%s%s", statusLocalLogKeyPrefix, testCase.Level.String()))
+		body = getRequest(t, ts, fmt.Sprintf("%s%s", statusLocalLogKeyPrefix, testCase.Level.Name()))
 		entities := entryWarpper{}
 		if err := json.Unmarshal(body, &entities); err != nil {
 			t.Fatal(err)

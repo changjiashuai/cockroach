@@ -109,9 +109,9 @@ func unescapeStringForFilename(s string) string {
 	return strings.Replace(sUnescapedPartial, "__", "_", -1)
 }
 
-// logName returns a new log file name containing level, with start time t, and
-// the name for the symlink for level.
-func logName(level Level, t time.Time) (name, link string) {
+// logName returns a new log file name containing the severity, with start time
+// t, and the name for the symlink for the severity.
+func logName(severity Severity, t time.Time) (name, link string) {
 	// Replace the ':'s in the time format with '_'s to allow for log files in
 	// Windows.
 	tFormatted := strings.Replace(t.Format(time.RFC3339), ":", "_", -1)
@@ -120,10 +120,10 @@ func logName(level Level, t time.Time) (name, link string) {
 		escapeStringForFilename(program),
 		escapeStringForFilename(host),
 		escapeStringForFilename(userName),
-		level.String(),
+		severity.Name(),
 		tFormatted,
 		pid)
-	return name, program + "." + level.String()
+	return name, program + "." + severity.Name()
 }
 
 // A FileDetails holds all of the particulars that can be parsed by the name of
@@ -132,7 +132,7 @@ type FileDetails struct {
 	Program  string
 	Host     string
 	UserName string
-	Level    Level
+	Severity Severity
 	Time     time.Time
 	PID      int
 }
@@ -143,9 +143,9 @@ func parseLogFilename(filename string) (FileDetails, error) {
 		return FileDetails{}, util.Errorf("not a log file")
 	}
 
-	level, levelFound := LevelFromString(matches[4])
-	if !levelFound {
-		return FileDetails{}, util.Errorf("not a log file, couldn't parse level")
+	sev, sevFound := SeverityByName(matches[4])
+	if !sevFound {
+		return FileDetails{}, util.Errorf("not a log file, couldn't parse severity")
 	}
 
 	// Replace the '_'s with ':'s to restore the correct time format.
@@ -164,7 +164,7 @@ func parseLogFilename(filename string) (FileDetails, error) {
 		Program:  unescapeStringForFilename(matches[1]),
 		Host:     unescapeStringForFilename(matches[2]),
 		UserName: unescapeStringForFilename(matches[3]),
-		Level:    level,
+		Severity: sev,
 		Time:     time,
 		PID:      int(pid),
 	}, nil
@@ -173,15 +173,15 @@ func parseLogFilename(filename string) (FileDetails, error) {
 var onceLogDirs sync.Once
 
 // create creates a new log file and returns the file and its filename, which
-// contains level ("INFO", "FATAL", etc.) and t.  If the file is created
+// contains severity ("INFO", "FATAL", etc.) and t.  If the file is created
 // successfully, create also attempts to update the symlink for that tag, ignoring
 // errors.
-func create(level Level, t time.Time) (f *os.File, filename string, err error) {
+func create(severity Severity, t time.Time) (f *os.File, filename string, err error) {
 	onceLogDirs.Do(createLogDirs)
 	if len(logDirs) == 0 {
 		return nil, "", errors.New("log: no log dirs")
 	}
-	name, link := logName(level, t)
+	name, link := logName(severity, t)
 	var lastErr error
 	for _, dir := range logDirs {
 		fname := filepath.Join(dir, name)
@@ -309,7 +309,7 @@ func (a int64sortable) Less(i, j int) bool { return a[i] < a[j] }
 // stop reading in new files if the EntiresCutoff is exceeded, no more files
 // will be retrieved. The logs entries returned will be in decreasing order,
 // with the closest log to the start time being the first entry.
-func FetchEntiresFromFiles(level Level, startTimeNano, endTimeNano int64) ([]proto.LogEntry, error) {
+func FetchEntiresFromFiles(severity Severity, startTimeNano, endTimeNano int64) ([]proto.LogEntry, error) {
 	logFiles, err := ListLogFiles()
 	if err != nil {
 		return nil, err
@@ -322,7 +322,7 @@ func FetchEntiresFromFiles(level Level, startTimeNano, endTimeNano int64) ([]pro
 	// from the start time onward in it.
 	var closestToStartNano int64
 	for _, logFile := range logFiles {
-		if logFile.Details.Level == level {
+		if logFile.Details.Severity == severity {
 			nano := logFile.Details.Time.UnixNano()
 			if nano <= endTimeNano {
 				logFileMap[nano] = logFile

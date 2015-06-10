@@ -26,22 +26,22 @@ import (
 // Test that logName and parseLogFilename work as advertised.
 func TestLogFilenameParsing(t *testing.T) {
 	testCases := []struct {
-		Level Level
-		Time  time.Time
+		Severity Severity
+		Time     time.Time
 	}{
-		{INFO, time.Now()},
-		{WARNING, time.Now().AddDate(-10, 0, 0)},
-		{ERROR, time.Now().AddDate(0, 0, -1)},
+		{InfoLog, time.Now()},
+		{WarningLog, time.Now().AddDate(-10, 0, 0)},
+		{ErrorLog, time.Now().AddDate(0, 0, -1)},
 	}
 
 	for i, testCase := range testCases {
-		filename, _ := logName(testCase.Level, testCase.Time)
+		filename, _ := logName(testCase.Severity, testCase.Time)
 		details, err := parseLogFilename(filename)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if details.Level != testCase.Level {
-			t.Errorf("%d: Levels do not match, expected:%s - actual:%s", i, testCase.Level, details.Level)
+		if details.Severity != testCase.Severity {
+			t.Errorf("%d: Severities do not match, expected:%s - actual:%s", i, testCase.Severity, details.Severity)
 		}
 		if details.Time.Format(time.RFC3339) != testCase.Time.Format(time.RFC3339) {
 			t.Errorf("%d: Times do not match, expected:%v - actual:%v", i, testCase.Time.Format(time.RFC3339), details.Time.Format(time.RFC3339))
